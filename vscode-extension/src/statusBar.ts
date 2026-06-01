@@ -62,7 +62,15 @@ export class StatusBar {
     const wire = (repoState: { onDidChange: vscode.Event<void> }) =>
       this.disposables.push(repoState.onDidChange(() => this.render()));
     git.repositories.forEach(r => wire(r.state));
-    this.disposables.push(git.onDidOpenRepository(r => wire(r.state)));
+    this.disposables.push(git.onDidOpenRepository(r => {
+      // New repo appeared (could be from our own git init). Wire its change
+      // events AND render immediately so the "git not initialized" label
+      // flips to the real name + change count without waiting.
+      wire(r.state);
+      this.render();
+    }));
+    // Now that the git API is active, render once with real data.
+    this.render();
   }
 
   async refresh(): Promise<void> {
@@ -133,19 +141,37 @@ export class StatusBar {
       this.item.text = `≫ ${name} · ${dirty} change${dirty === 1 ? "" : "s"}`;
       this.item.tooltip = `${streakLine}\n${dirty} uncommitted change${dirty === 1 ? "" : "s"} in ${name}\n\nClick for menu`;
       this.item.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-    } else if (name) {
+      return;
+    }
+    if (name) {
       this.item.text = this.streak > 0
         ? `≫ ${this.streak} day streak`
         : `≫ ${name}`;
       this.item.tooltip = `Working in ${name}\n${this.streak > 0 ? `${this.streak} day streak — nothing to commit` : "Nothing to commit"}\n\nClick for menu`;
       this.item.backgroundColor = undefined;
-    } else {
-      this.item.text = this.streak > 0
-        ? `≫ ${this.streak} day streak`
-        : "≫ Gitlane ready";
-      this.item.tooltip = "No git repo in this window\n\nClick for menu";
-      this.item.backgroundColor = undefined;
+      return;
     }
+
+    // No git repo detected. If a workspace folder is open, call it out so
+    // the user knows the extension sees them — it's just waiting for git init.
+    const ws = vscode.window.activeTextEditor
+      ? vscode.workspace.getWorkspaceFolder(vscode.window.activeTextEditor.document.uri)
+      : vscode.workspace.workspaceFolders?.[0];
+
+    if (ws) {
+      this.item.text = `≫ ${ws.name} · git not initialized`;
+      this.item.tooltip =
+        `${ws.name} isn't a git repository yet.\n\n` +
+        `Click → "Commit now" — Gitlane will offer to initialize it for you.`;
+      this.item.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+      return;
+    }
+
+    this.item.text = this.streak > 0
+      ? `≫ ${this.streak} day streak`
+      : "≫ Gitlane ready";
+    this.item.tooltip = "No folder open in VS Code\n\nClick for menu";
+    this.item.backgroundColor = undefined;
   }
 
   dispose(): void {

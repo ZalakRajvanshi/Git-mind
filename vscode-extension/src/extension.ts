@@ -15,9 +15,10 @@ export function activate(context: vscode.ExtensionContext): void {
   statusBar = new StatusBar();
   context.subscriptions.push({ dispose: () => statusBar?.dispose() });
 
-  // Status bar's project label follows the active editor.
+  // Status bar's project label follows the active editor + the open folders.
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(() => statusBar?.refresh()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => statusBar?.refresh()),
   );
 
   context.subscriptions.push(

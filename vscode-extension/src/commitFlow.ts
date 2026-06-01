@@ -80,6 +80,8 @@ export async function runCommitFlow(): Promise<void> {
       vscode.window.showErrorMessage(`git init failed: ${r.err}`);
       return;
     }
+    // VS Code's git extension auto-detects the new .git within a tick — the
+    // status bar refreshes itself via onDidOpenRepository (see statusBar.ts).
   }
 
   try {
