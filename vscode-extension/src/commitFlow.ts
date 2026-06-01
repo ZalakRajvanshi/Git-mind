@@ -65,6 +65,51 @@ export async function runCommitFlow(): Promise<void> {
     return;
   }
 
+  // Caught-in-the-wild: scaffolders / copy-pasted snippets leave a remote
+  // like "https://github.com/YOUR_USERNAME/repo.git" wired up. hasRemote()
+  // returns true, push silently fails, user thinks the extension is broken.
+  // Sniff this BEFORE doing anything else and offer to repair.
+  if (await git.isGitRepo(repoPath)) {
+    const bogus = await git.placeholderRemoteUrl(repoPath);
+    if (bogus) {
+      const choice = await vscode.window.showWarningMessage(
+        `Your remote URL looks like a template:\n${bogus}\n\nThat's why pushes have been silently failing. Fix it now?`,
+        { modal: true },
+        "Pick from my GitHub repos", "Enter URL manually",
+      );
+      if (!choice) return;
+      let newUrl: string | undefined;
+      if (choice === "Pick from my GitHub repos") {
+        const settings = loadSettingsJson(projectRoot);
+        const username = (settings.github_username as string) || "";
+        if (!env.GITHUB_TOKEN || !username) {
+          vscode.window.showErrorMessage("Need GITHUB_TOKEN + github_username in the Gitlane install. Falling back to manual entry.");
+          newUrl = await vscode.window.showInputBox({ prompt: "Correct GitHub URL", value: bogus });
+        } else {
+          const defaultName = path.basename(repoPath).toLowerCase().replace(/[ _]/g, "-");
+          const existing = await import("./github").then(g => g.getRepoIfExists(env.GITHUB_TOKEN!, username, defaultName));
+          if (existing) {
+            newUrl = existing.clone_url;
+          } else {
+            newUrl = await vscode.window.showInputBox({
+              prompt: `No repo named "${defaultName}" found under @${username}. Paste the correct URL`,
+              value: bogus,
+            });
+          }
+        }
+      } else {
+        newUrl = await vscode.window.showInputBox({ prompt: "Correct GitHub URL", value: bogus });
+      }
+      if (!newUrl) return;
+      const fix = await git.setRemoteUrl(repoPath, newUrl);
+      if (!fix.ok) {
+        vscode.window.showErrorMessage(`Couldn't set remote: ${fix.err}`);
+        return;
+      }
+      vscode.window.showInformationMessage(`Remote fixed → ${newUrl}`);
+    }
+  }
+
   // Brand-new folder that hasn't been git-init'd yet: offer to do it now so
   // the rest of the flow (auto .gitignore, secret scan, auto-create GitHub
   // repo on push) works on first-touch projects.

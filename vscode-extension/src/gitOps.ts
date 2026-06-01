@@ -130,14 +130,46 @@ export async function setOriginAndPush(repoPath: string, cloneUrl: string): Prom
 /**
  * How many local commits are ahead of the remote tracking branch. Used to
  * detect "nothing new to commit, but local has unpushed commits."
+ *
+ * If origin/<branch> doesn't exist (never fetched — e.g. bogus remote URL
+ * never reached, or first push never happened), fall back to counting ALL
+ * local commits — none of them have been pushed.
  */
 export async function commitsAhead(repoPath: string): Promise<number> {
   const branchInfo = await run("git", ["branch", "--show-current"], repoPath);
   const branch = branchInfo.stdout.trim();
   if (!branch) return 0;
   const r = await run("git", ["rev-list", "--count", `origin/${branch}..HEAD`], repoPath);
-  if (r.code !== 0) return 0;
-  return parseInt(r.stdout.trim(), 10) || 0;
+  if (r.code === 0) return parseInt(r.stdout.trim(), 10) || 0;
+  const all = await run("git", ["rev-list", "--count", "HEAD"], repoPath);
+  if (all.code !== 0) return 0;
+  return parseInt(all.stdout.trim(), 10) || 0;
+}
+
+/**
+ * Returns the origin URL if it looks like an unfilled template
+ * (YOUR_USERNAME, <username>, <your_…>, etc.) rather than a real GitHub repo.
+ * These come from scaffolders or copy-pasted README snippets and silently
+ * break every push until fixed.
+ */
+export async function placeholderRemoteUrl(repoPath: string): Promise<string | null> {
+  const r = await run("git", ["remote", "get-url", "origin"], repoPath);
+  if (r.code !== 0) return null;
+  const url = r.stdout.trim();
+  if (!url) return null;
+  const placeholders = [
+    /your[_-]?username/i,
+    /<[^>]*username[^>]*>/i,
+    /<your[_-]/i,
+    /example\.com/i,
+    /user\/repo\.git/i,
+  ];
+  return placeholders.some(p => p.test(url)) ? url : null;
+}
+
+export async function setRemoteUrl(repoPath: string, url: string): Promise<{ ok: boolean; err: string }> {
+  const r = await run("git", ["remote", "set-url", "origin", url], repoPath);
+  return { ok: r.code === 0, err: r.stderr || r.stdout };
 }
 
 export async function remoteUrl(repoPath: string): Promise<string> {
