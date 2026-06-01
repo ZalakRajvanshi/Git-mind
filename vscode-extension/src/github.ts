@@ -59,6 +59,31 @@ export async function fetchAllRecent(
   return all;
 }
 
+/**
+ * Look up a specific repo on the user's GitHub. Returns null if missing,
+ * 404'd, or the request errored — caller treats that as "create a new one."
+ * With a token this finds private repos too; without, only public.
+ */
+export async function getRepoIfExists(
+  token: string | undefined,
+  username: string,
+  repo: string,
+): Promise<{ name: string; clone_url: string; html_url: string; private: boolean } | null> {
+  try {
+    const res = await fetch(`${API}/repos/${username}/${repo}`, { headers: headers(token) });
+    if (!res.ok) return null;
+    const data: any = await res.json();
+    return {
+      name:      data.name,
+      clone_url: data.clone_url,
+      html_url:  data.html_url,
+      private:   data.private,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function createRepo(
   token: string,
   name: string,

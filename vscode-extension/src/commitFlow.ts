@@ -4,7 +4,7 @@ import * as fs from "fs";
 import { ensureProjectRoot, readEnv, loadSettingsJson, dbPath } from "./env";
 import { GitlaneDb } from "./db";
 import { generateCommitMessage, modelFromSettings } from "./groq";
-import { createRepo } from "./github";
+import { createRepo, getRepoIfExists } from "./github";
 import { scanFile, autofixFile, ensureGitignore, appendToGitignore, BLOCKED_FILENAMES, Finding } from "./scanner";
 import * as git from "./gitOps";
 import { getLastRepoPath, setLastRepoPath } from "./state";
@@ -212,9 +212,39 @@ export async function runCommitFlow(): Promise<void> {
             vscode.window.showErrorMessage("No GitHub remote and no GITHUB_TOKEN to create one. Committed locally.");
             return;
           }
+
+          const defaultName = path.basename(repoPath).toLowerCase().replace(/[ _]/g, "-");
+
+          // Auto-detect: do you already have a GitHub repo whose name matches
+          // this folder? If yes, offer to link instead of trying to create one
+          // (which would 422 with "already exists").
+          if (username) {
+            progress.report({ message: `Checking github.com/${username}/${defaultName}…` });
+            const existing = await getRepoIfExists(env.GITHUB_TOKEN, username, defaultName);
+            if (existing) {
+              const choice = await vscode.window.showInformationMessage(
+                `Found existing GitHub repo "${username}/${existing.name}". Link this folder to it and push?`,
+                { modal: true }, "Link and push", "Create a different repo",
+              );
+              if (!choice) return;
+              if (choice === "Link and push") {
+                progress.report({ message: "Linking + pushing…" });
+                const sp = await git.setOriginAndPush(repoPath, existing.clone_url);
+                if (!sp.ok) {
+                  vscode.window.showErrorMessage(`Linked but push failed: ${sp.out}`);
+                  return;
+                }
+                vscode.window.showInformationMessage(`🚀 Pushed: ${existing.html_url}`);
+                return;
+              }
+              // "Create a different repo" → fall through
+            }
+          }
+
+          // Either no auto-match, no username, or user chose to create a new one.
           const name = await vscode.window.showInputBox({
-            prompt: "No GitHub remote. Repo name?",
-            value: path.basename(repoPath).toLowerCase().replace(/[ _]/g, "-"),
+            prompt: "Name for the new GitHub repo:",
+            value: defaultName,
           });
           if (!name) return;
           const visibility = await vscode.window.showQuickPick(["private", "public"], { placeHolder: "Visibility" });
