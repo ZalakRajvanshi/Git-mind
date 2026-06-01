@@ -22,24 +22,27 @@ export async function ensureProjectRoot(): Promise<string | undefined> {
   if (current && projectRootIsValid(current)) return current;
 
   const proceed = await vscode.window.showInformationMessage(
-    "Gitlane needs to know where your project folder is (it contains data/gitmind.db and .env). Pick it once.",
+    "First-time setup: where did you clone the Gitlane repo? (the folder containing main.py). " +
+    "This is NOT the project you want to commit — it's the Gitlane install itself. You only pick this once.",
     { modal: false },
-    "Pick folder", "Later",
+    "Pick Gitlane install folder", "Later",
   );
-  if (proceed !== "Pick folder") return undefined;
+  if (proceed !== "Pick Gitlane install folder") return undefined;
 
   const picked = await vscode.window.showOpenDialog({
     canSelectFolders: true,
     canSelectFiles: false,
     canSelectMany: false,
-    openLabel: "Use this as Gitlane project folder",
+    openLabel: "Use as Gitlane install folder",
+    title: "Pick the folder where Gitlane is installed (contains main.py)",
   });
   if (!picked || picked.length === 0) return undefined;
 
   const candidate = picked[0].fsPath;
   if (!projectRootIsValid(candidate)) {
     vscode.window.showErrorMessage(
-      `Doesn't look like a Gitlane project (no main.py and no data/gitmind.db inside ${candidate}).`,
+      `That folder doesn't contain main.py — it's not the Gitlane install. ` +
+      `Pick the folder you cloned from github.com/ZalakRajvanshi/Gitlane, not the project you want to commit.`,
     );
     return undefined;
   }

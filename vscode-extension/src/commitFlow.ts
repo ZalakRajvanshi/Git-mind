@@ -65,6 +65,23 @@ export async function runCommitFlow(): Promise<void> {
     return;
   }
 
+  // Brand-new folder that hasn't been git-init'd yet: offer to do it now so
+  // the rest of the flow (auto .gitignore, secret scan, auto-create GitHub
+  // repo on push) works on first-touch projects.
+  if (!(await git.isGitRepo(repoPath))) {
+    const folderName = path.basename(repoPath);
+    const choice = await vscode.window.showInformationMessage(
+      `"${folderName}" isn't a git repository yet. Initialize one and continue?`,
+      { modal: true }, "Initialize git",
+    );
+    if (choice !== "Initialize git") return;
+    const r = await git.init(repoPath);
+    if (!r.ok) {
+      vscode.window.showErrorMessage(`git init failed: ${r.err}`);
+      return;
+    }
+  }
+
   try {
     await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: "Gitlane", cancellable: false },

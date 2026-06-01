@@ -12,6 +12,21 @@ function run(cmd: string, args: string[], cwd: string): Promise<{ code: number; 
   });
 }
 
+export async function isGitRepo(repoPath: string): Promise<boolean> {
+  const r = await run("git", ["rev-parse", "--is-inside-work-tree"], repoPath);
+  return r.code === 0 && r.stdout.trim() === "true";
+}
+
+export async function init(repoPath: string): Promise<{ ok: boolean; err: string }> {
+  const r = await run("git", ["init", "-b", "main"], repoPath);
+  if (r.code !== 0) {
+    // Older git versions don't support -b; fall back.
+    const r2 = await run("git", ["init"], repoPath);
+    return { ok: r2.code === 0, err: r2.stderr || r2.stdout };
+  }
+  return { ok: true, err: "" };
+}
+
 export async function unstagedFiles(repoPath: string): Promise<string[]> {
   const r = await run("git", ["status", "--short"], repoPath);
   return r.stdout.split("\n").filter(Boolean).map(l => l.slice(2).trim());
