@@ -73,12 +73,71 @@ export async function push(repoPath: string): Promise<{ ok: boolean; out: string
   return { ok: r.code === 0, out: r.code === 0 ? (r.stdout || "Pushed") : (r.stderr || "Push failed") };
 }
 
+/**
+ * Wire up origin and push. Handles the common scenario 2 gotcha: the user
+ * created the GitHub repo with "Initialize with README" checked, so the
+ * remote already has a commit our local doesn't. A plain push -u is then
+ * rejected as non-fast-forward.
+ *
+ * On non-fast-forward: fetch origin + rebase local on top of the existing
+ * remote history (with --allow-unrelated-histories for the empty-local case),
+ * then retry the push. If the rebase hits conflicts, surface them clearly.
+ */
 export async function setOriginAndPush(repoPath: string, cloneUrl: string): Promise<{ ok: boolean; out: string }> {
   await run("git", ["remote", "remove", "origin"], repoPath);
   const add = await run("git", ["remote", "add", "origin", cloneUrl], repoPath);
   if (add.code !== 0) return { ok: false, out: add.stderr };
-  const push = await run("git", ["push", "-u", "origin", "HEAD"], repoPath);
-  return { ok: push.code === 0, out: push.code === 0 ? push.stdout : (push.stderr || push.stdout) };
+
+  let push = await run("git", ["push", "-u", "origin", "HEAD"], repoPath);
+  if (push.code === 0) return { ok: true, out: push.stdout || "Pushed" };
+
+  const errBlob = `${push.stderr}\n${push.stdout}`;
+  const isNonFastForward = /non-fast-forward|fetch first|updates were rejected/i.test(errBlob);
+  if (!isNonFastForward) {
+    return { ok: false, out: push.stderr || push.stdout };
+  }
+
+  // Remote has commits we don't have (typically the README from GitHub's
+  // "initialize this repository" option). Pull-rebase, then re-push.
+  const branchInfo = await run("git", ["branch", "--show-current"], repoPath);
+  const branch = branchInfo.stdout.trim() || "main";
+
+  const fetch = await run("git", ["fetch", "origin"], repoPath);
+  if (fetch.code !== 0) {
+    return { ok: false, out: `Fetch failed:\n${fetch.stderr || fetch.stdout}` };
+  }
+
+  const rebase = await run(
+    "git",
+    ["pull", "--rebase", "--allow-unrelated-histories", "origin", branch],
+    repoPath,
+  );
+  if (rebase.code !== 0) {
+    return {
+      ok: false,
+      out:
+        `The GitHub repo has files we don't have locally and they couldn't be merged automatically.\n` +
+        `Resolve the conflicts in your editor, then run: git rebase --continue && git push -u origin HEAD\n\n` +
+        `${rebase.stderr || rebase.stdout}`,
+    };
+  }
+
+  push = await run("git", ["push", "-u", "origin", "HEAD"], repoPath);
+  if (push.code === 0) return { ok: true, out: push.stdout || "Pushed after pulling existing GitHub content" };
+  return { ok: false, out: push.stderr || push.stdout };
+}
+
+/**
+ * How many local commits are ahead of the remote tracking branch. Used to
+ * detect "nothing new to commit, but local has unpushed commits."
+ */
+export async function commitsAhead(repoPath: string): Promise<number> {
+  const branchInfo = await run("git", ["branch", "--show-current"], repoPath);
+  const branch = branchInfo.stdout.trim();
+  if (!branch) return 0;
+  const r = await run("git", ["rev-list", "--count", `origin/${branch}..HEAD`], repoPath);
+  if (r.code !== 0) return 0;
+  return parseInt(r.stdout.trim(), 10) || 0;
 }
 
 export async function remoteUrl(repoPath: string): Promise<string> {

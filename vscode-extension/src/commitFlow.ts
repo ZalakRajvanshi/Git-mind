@@ -94,6 +94,27 @@ export async function runCommitFlow(): Promise<void> {
 
         const unstaged = await git.unstagedFiles(repoPath);
         if (unstaged.length === 0) {
+          // Maybe the user committed earlier and just hasn't pushed yet.
+          if (await git.hasRemote(repoPath)) {
+            const ahead = await git.commitsAhead(repoPath);
+            if (ahead > 0) {
+              const pushChoice = await vscode.window.showInformationMessage(
+                `Nothing new to commit, but you have ${ahead} commit${ahead === 1 ? "" : "s"} not pushed yet. Push now?`,
+                { modal: false }, "Push",
+              );
+              if (pushChoice === "Push") {
+                progress.report({ message: "Pushing…" });
+                const p = await git.push(repoPath);
+                if (!p.ok) {
+                  vscode.window.showErrorMessage(`Push failed: ${p.out}`);
+                  return;
+                }
+                const url = await git.remoteUrl(repoPath);
+                vscode.window.showInformationMessage(`🚀 Pushed${url ? `: ${url}` : ""}.`);
+              }
+              return;
+            }
+          }
           vscode.window.showInformationMessage("Nothing to commit.");
           return;
         }
