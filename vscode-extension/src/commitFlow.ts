@@ -50,6 +50,85 @@ async function pickRepoPath(): Promise<string | undefined> {
   return pick?.path;
 }
 
+/**
+ * Single source of truth for "push to GitHub" — used both after a fresh
+ * commit AND from the "nothing-new-to-commit-but-you-have-unpushed-stuff"
+ * recovery path. Handles three states transparently:
+ *
+ *   - Remote already wired up → just `git push` (with non-FF auto-rebase)
+ *   - No remote, but a GitHub repo with the folder's name exists → link + push
+ *   - Neither → ask for a name + visibility, create the repo, push
+ */
+async function pushOrSetupRemote(
+  repoPath: string,
+  username: string,
+  token: string | undefined,
+): Promise<void> {
+  if (await git.hasRemote(repoPath)) {
+    const p = await git.push(repoPath);
+    if (!p.ok) {
+      vscode.window.showErrorMessage(`Push failed: ${p.out}`);
+      return;
+    }
+    const url = await git.remoteUrl(repoPath);
+    vscode.window.showInformationMessage(`🚀 Pushed${url ? `: ${url}` : ""}.`);
+    return;
+  }
+
+  if (!token) {
+    vscode.window.showErrorMessage(
+      "No GitHub remote and no GITHUB_TOKEN to create one. Add GITHUB_TOKEN to your Gitlane .env, or set up a remote manually.",
+    );
+    return;
+  }
+
+  const defaultName = path.basename(repoPath).toLowerCase().replace(/[ _]/g, "-");
+
+  // Auto-detect existing repo so the user doesn't have to type a name.
+  if (username) {
+    const existing = await getRepoIfExists(token, username, defaultName);
+    if (existing) {
+      const choice = await vscode.window.showInformationMessage(
+        `Found existing GitHub repo "${username}/${existing.name}". Link this folder to it and push?`,
+        { modal: true }, "Link and push", "Create a different repo",
+      );
+      if (!choice) return;
+      if (choice === "Link and push") {
+        const sp = await git.setOriginAndPush(repoPath, existing.clone_url);
+        if (!sp.ok) {
+          vscode.window.showErrorMessage(`Linked but push failed: ${sp.out}`);
+          return;
+        }
+        vscode.window.showInformationMessage(`🚀 Pushed: ${existing.html_url}`);
+        return;
+      }
+    }
+  }
+
+  // Either no match, no username, or user chose to create a different repo.
+  const name = await vscode.window.showInputBox({
+    prompt: "Name for the new GitHub repo:",
+    value: defaultName,
+  });
+  if (!name) return;
+  const visibility = await vscode.window.showQuickPick(
+    ["private", "public"],
+    { placeHolder: "Visibility" },
+  );
+  if (!visibility) return;
+  const r = await createRepo(token, name, visibility === "private");
+  if (!r.ok) {
+    vscode.window.showErrorMessage(`GitHub: ${r.error}`);
+    return;
+  }
+  const sp = await git.setOriginAndPush(repoPath, r.clone_url);
+  if (!sp.ok) {
+    vscode.window.showErrorMessage(`Repo created but push failed: ${sp.out}`);
+    return;
+  }
+  vscode.window.showInformationMessage(`🚀 Pushed: https://github.com/${username}/${name}`);
+}
+
 export async function runCommitFlow(): Promise<void> {
   const projectRoot = await ensureProjectRoot();
   if (!projectRoot) return;
@@ -64,6 +143,11 @@ export async function runCommitFlow(): Promise<void> {
     );
     return;
   }
+
+  // Hoisted: needed both in the post-commit push and the "nothing-to-commit-
+  // but-you-have-unpushed-stuff" recovery branch below.
+  const settings = loadSettingsJson(projectRoot);
+  const username = (settings.github_username as string) || "";
 
   // Caught-in-the-wild: scaffolders / copy-pasted snippets leave a remote
   // like "https://github.com/YOUR_USERNAME/repo.git" wired up. hasRemote()
@@ -80,14 +164,12 @@ export async function runCommitFlow(): Promise<void> {
       if (!choice) return;
       let newUrl: string | undefined;
       if (choice === "Pick from my GitHub repos") {
-        const settings = loadSettingsJson(projectRoot);
-        const username = (settings.github_username as string) || "";
         if (!env.GITHUB_TOKEN || !username) {
           vscode.window.showErrorMessage("Need GITHUB_TOKEN + github_username in the Gitlane install. Falling back to manual entry.");
           newUrl = await vscode.window.showInputBox({ prompt: "Correct GitHub URL", value: bogus });
         } else {
           const defaultName = path.basename(repoPath).toLowerCase().replace(/[ _]/g, "-");
-          const existing = await import("./github").then(g => g.getRepoIfExists(env.GITHUB_TOKEN!, username, defaultName));
+          const existing = await getRepoIfExists(env.GITHUB_TOKEN, username, defaultName);
           if (existing) {
             newUrl = existing.clone_url;
           } else {
@@ -139,26 +221,20 @@ export async function runCommitFlow(): Promise<void> {
 
         const unstaged = await git.unstagedFiles(repoPath);
         if (unstaged.length === 0) {
-          // Maybe the user committed earlier and just hasn't pushed yet.
-          if (await git.hasRemote(repoPath)) {
-            const ahead = await git.commitsAhead(repoPath);
-            if (ahead > 0) {
-              const pushChoice = await vscode.window.showInformationMessage(
-                `Nothing new to commit, but you have ${ahead} commit${ahead === 1 ? "" : "s"} not pushed yet. Push now?`,
-                { modal: false }, "Push",
-              );
-              if (pushChoice === "Push") {
-                progress.report({ message: "Pushing…" });
-                const p = await git.push(repoPath);
-                if (!p.ok) {
-                  vscode.window.showErrorMessage(`Push failed: ${p.out}`);
-                  return;
-                }
-                const url = await git.remoteUrl(repoPath);
-                vscode.window.showInformationMessage(`🚀 Pushed${url ? `: ${url}` : ""}.`);
-              }
-              return;
+          // Working tree clean — but maybe there are unpushed commits
+          // (common after pressing Escape on the repo-name prompt before).
+          const ahead = await git.commitsAhead(repoPath);
+          if (ahead > 0) {
+            const haveRemote = await git.hasRemote(repoPath);
+            const msg = haveRemote
+              ? `Nothing new to commit, but you have ${ahead} commit${ahead === 1 ? "" : "s"} not pushed yet. Push now?`
+              : `Nothing new to commit, but ${ahead} commit${ahead === 1 ? "" : "s"} ${ahead === 1 ? "is" : "are"} sitting locally with no GitHub remote yet. Set one up and push now?`;
+            const choice = await vscode.window.showInformationMessage(msg, { modal: false }, "Yes");
+            if (choice === "Yes") {
+              progress.report({ message: "Pushing…" });
+              await pushOrSetupRemote(repoPath, username, env.GITHUB_TOKEN);
             }
+            return;
           }
           vscode.window.showInformationMessage("Nothing to commit.");
           return;
@@ -231,8 +307,6 @@ export async function runCommitFlow(): Promise<void> {
 
         progress.report({ message: "Generating commit message…" });
         const diff = await git.stagedDiff(repoPath);
-        const settings = loadSettingsJson(projectRoot);
-        const username = (settings.github_username as string) || "";
         const model = modelFromSettings(projectRoot);
         const message = await generateCommitMessage(
           { apiKey: env.GROQ_API_KEY!, model },
@@ -275,71 +349,7 @@ export async function runCommitFlow(): Promise<void> {
         }
 
         progress.report({ message: "Pushing…" });
-        if (!(await git.hasRemote(repoPath))) {
-          if (!env.GITHUB_TOKEN) {
-            vscode.window.showErrorMessage("No GitHub remote and no GITHUB_TOKEN to create one. Committed locally.");
-            return;
-          }
-
-          const defaultName = path.basename(repoPath).toLowerCase().replace(/[ _]/g, "-");
-
-          // Auto-detect: do you already have a GitHub repo whose name matches
-          // this folder? If yes, offer to link instead of trying to create one
-          // (which would 422 with "already exists").
-          if (username) {
-            progress.report({ message: `Checking github.com/${username}/${defaultName}…` });
-            const existing = await getRepoIfExists(env.GITHUB_TOKEN, username, defaultName);
-            if (existing) {
-              const choice = await vscode.window.showInformationMessage(
-                `Found existing GitHub repo "${username}/${existing.name}". Link this folder to it and push?`,
-                { modal: true }, "Link and push", "Create a different repo",
-              );
-              if (!choice) return;
-              if (choice === "Link and push") {
-                progress.report({ message: "Linking + pushing…" });
-                const sp = await git.setOriginAndPush(repoPath, existing.clone_url);
-                if (!sp.ok) {
-                  vscode.window.showErrorMessage(`Linked but push failed: ${sp.out}`);
-                  return;
-                }
-                vscode.window.showInformationMessage(`🚀 Pushed: ${existing.html_url}`);
-                return;
-              }
-              // "Create a different repo" → fall through
-            }
-          }
-
-          // Either no auto-match, no username, or user chose to create a new one.
-          const name = await vscode.window.showInputBox({
-            prompt: "Name for the new GitHub repo:",
-            value: defaultName,
-          });
-          if (!name) return;
-          const visibility = await vscode.window.showQuickPick(["private", "public"], { placeHolder: "Visibility" });
-          if (!visibility) return;
-          const r = await createRepo(env.GITHUB_TOKEN, name, visibility === "private");
-          if (!r.ok) {
-            vscode.window.showErrorMessage(`GitHub: ${r.error}`);
-            return;
-          }
-          const sp = await git.setOriginAndPush(repoPath, r.clone_url);
-          if (!sp.ok) {
-            vscode.window.showErrorMessage(`Repo created but push failed: ${sp.out}`);
-            return;
-          }
-          vscode.window.showInformationMessage(
-            `🚀 Pushed: https://github.com/${username}/${name}`,
-          );
-          return;
-        }
-
-        const p = await git.push(repoPath);
-        if (!p.ok) {
-          vscode.window.showErrorMessage(`Push failed: ${p.out}`);
-          return;
-        }
-        const url = await git.remoteUrl(repoPath);
-        vscode.window.showInformationMessage(`🚀 Pushed${url ? `: ${url}` : ""}.`);
+        await pushOrSetupRemote(repoPath, username, env.GITHUB_TOKEN);
       },
     );
   } catch (e: any) {
