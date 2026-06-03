@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -13,35 +14,106 @@ export async function setProjectRoot(p: string): Promise<void> {
 }
 
 export function projectRootIsValid(p: string): boolean {
-  return !!p && fs.existsSync(path.join(p, "data", "gitmind.db"))
-              || (!!p && fs.existsSync(path.join(p, "main.py")));
+  if (!p) return false;
+  return fs.existsSync(path.join(p, "main.py"))
+      || fs.existsSync(path.join(p, "data", "gitmind.db"));
+}
+
+/**
+ * Scan the user's usual places for a Gitlane install (a folder with main.py
+ * + the agent/ module + or a data/gitmind.db). We try the common Windows /
+ * macOS / Linux home locations the user is likely to have cloned it into.
+ * Returns the first match, or undefined.
+ *
+ * The goal is to make the picker dialog never fire — the user is the same
+ * person who cloned Gitlane somewhere, so 90% of the time we can just find it.
+ */
+export function autoDetectGitlaneInstall(): string | undefined {
+  const home = os.homedir();
+  const candidates = [
+    // The exact location this conversation's author uses
+    path.join(home, "OneDrive", "Desktop", "Projects", "gitmind_v2", "gitmind_v2"),
+    path.join(home, "OneDrive", "Desktop", "gitmind_v2", "gitmind_v2"),
+    path.join(home, "Desktop", "Projects", "gitmind_v2", "gitmind_v2"),
+    path.join(home, "Desktop", "gitmind_v2", "gitmind_v2"),
+    path.join(home, "gitmind_v2", "gitmind_v2"),
+    path.join(home, "Projects", "gitmind_v2", "gitmind_v2"),
+
+    // Common rename-to-"Gitlane" / "gitlane" locations
+    path.join(home, "OneDrive", "Desktop", "Projects", "Gitlane"),
+    path.join(home, "OneDrive", "Desktop", "Projects", "gitlane"),
+    path.join(home, "OneDrive", "Desktop", "Gitlane"),
+    path.join(home, "OneDrive", "Desktop", "gitlane"),
+    path.join(home, "Desktop", "Projects", "Gitlane"),
+    path.join(home, "Desktop", "Projects", "gitlane"),
+    path.join(home, "Desktop", "Gitlane"),
+    path.join(home, "Desktop", "gitlane"),
+    path.join(home, "Projects", "Gitlane"),
+    path.join(home, "Projects", "gitlane"),
+    path.join(home, "Gitlane"),
+    path.join(home, "gitlane"),
+
+    // GitHub Desktop / IDE conventional locations
+    path.join(home, "Documents", "GitHub", "Gitlane"),
+    path.join(home, "Documents", "GitHub", "gitlane"),
+    path.join(home, "OneDrive", "Documents", "GitHub", "Gitlane"),
+    path.join(home, "OneDrive", "Documents", "GitHub", "gitlane"),
+    path.join(home, "source", "repos", "Gitlane"),  // Visual Studio default
+    path.join(home, "source", "repos", "gitlane"),
+  ];
+
+  for (const c of candidates) {
+    if (projectRootIsValid(c)) return c;
+  }
+  return undefined;
 }
 
 export async function ensureProjectRoot(): Promise<string | undefined> {
   const current = getProjectRoot();
   if (current && projectRootIsValid(current)) return current;
 
-  const proceed = await vscode.window.showInformationMessage(
-    "First-time setup: where did you clone the Gitlane repo? (the folder containing main.py). " +
-    "This is NOT the project you want to commit — it's the Gitlane install itself. You only pick this once.",
-    { modal: false },
-    "Pick Gitlane install folder", "Later",
-  );
-  if (proceed !== "Pick Gitlane install folder") return undefined;
+  // Try to find the install ourselves before asking the user. This is the
+  // common case — same machine that cloned Gitlane is the one running the
+  // extension.
+  const auto = autoDetectGitlaneInstall();
+  if (auto) {
+    const choice = await vscode.window.showInformationMessage(
+      `Found Gitlane install at:\n${auto}\n\nUse this?`,
+      { modal: false },
+      "Yes, use it", "Pick manually",
+    );
+    if (choice === "Yes, use it") {
+      await setProjectRoot(auto);
+      return auto;
+    }
+    // If they say "pick manually," fall through to the picker.
+  }
 
+  const proceed = await vscode.window.showInformationMessage(
+    "Gitlane needs to know where you cloned its source code (the folder with main.py). " +
+    "This is the GITLANE PROJECT itself, not the project you want to commit. " +
+    "You only pick this once.",
+    { modal: false },
+    "Pick Gitlane source folder", "Later",
+  );
+  if (proceed !== "Pick Gitlane source folder") return undefined;
+
+  // Default the picker to the user's home so they don't accidentally land
+  // inside their current project folder.
   const picked = await vscode.window.showOpenDialog({
     canSelectFolders: true,
     canSelectFiles: false,
     canSelectMany: false,
-    openLabel: "Use as Gitlane install folder",
-    title: "Pick the folder where Gitlane is installed (contains main.py)",
+    defaultUri: vscode.Uri.file(os.homedir()),
+    openLabel: "Use as Gitlane source",
+    title: "Pick the folder where you cloned github.com/ZalakRajvanshi/Gitlane (contains main.py)",
   });
   if (!picked || picked.length === 0) return undefined;
 
   const candidate = picked[0].fsPath;
   if (!projectRootIsValid(candidate)) {
     vscode.window.showErrorMessage(
-      `That folder doesn't contain main.py — it's not the Gitlane install. ` +
+      `That folder doesn't contain main.py — it's not the Gitlane source. ` +
       `Pick the folder you cloned from github.com/ZalakRajvanshi/Gitlane, not the project you want to commit.`,
     );
     return undefined;
