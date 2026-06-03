@@ -66,45 +66,39 @@ export async function commit(repoPath: string, message: string): Promise<{ ok: b
   return { ok: r.code === 0, out: r.code === 0 ? r.stdout : (r.stderr || r.stdout) };
 }
 
-export async function push(repoPath: string): Promise<{ ok: boolean; out: string }> {
-  let r = await run("git", ["push"], repoPath);
-  if (r.code === 0) return { ok: true, out: r.stdout || "Pushed" };
-  r = await run("git", ["push", "--set-upstream", "origin", "HEAD"], repoPath);
-  return { ok: r.code === 0, out: r.code === 0 ? (r.stdout || "Pushed") : (r.stderr || "Push failed") };
-}
-
 /**
- * Wire up origin and push. Handles the common scenario 2 gotcha: the user
- * created the GitHub repo with "Initialize with README" checked, so the
- * remote already has a commit our local doesn't. A plain push -u is then
- * rejected as non-fast-forward.
+ * Internal: run "git push <args>" and auto-recover from the most common
+ * failure — non-fast-forward (GitHub has commits we don't). On that error
+ * we fetch + pull --rebase + retry the same push. The user never sees
+ * the "fetch first" hint or has to type a git command.
  *
- * On non-fast-forward: fetch origin + rebase local on top of the existing
- * remote history (with --allow-unrelated-histories for the empty-local case),
- * then retry the push. If the rebase hits conflicts, surface them clearly.
+ * Used by both push() and setOriginAndPush() so every push path has the
+ * same auto-recovery behavior.
  */
-export async function setOriginAndPush(repoPath: string, cloneUrl: string): Promise<{ ok: boolean; out: string }> {
-  await run("git", ["remote", "remove", "origin"], repoPath);
-  const add = await run("git", ["remote", "add", "origin", cloneUrl], repoPath);
-  if (add.code !== 0) return { ok: false, out: add.stderr };
+async function tryPushOrRebase(
+  repoPath: string,
+  args: string[],
+): Promise<{ ok: boolean; out: string; failureKind?: "non-ff" | "upstream" | "other" }> {
+  let r = await run("git", ["push", ...args], repoPath);
+  if (r.code === 0) return { ok: true, out: r.stdout || "Pushed" };
 
-  let push = await run("git", ["push", "-u", "origin", "HEAD"], repoPath);
-  if (push.code === 0) return { ok: true, out: push.stdout || "Pushed" };
-
-  const errBlob = `${push.stderr}\n${push.stdout}`;
-  const isNonFastForward = /non-fast-forward|fetch first|updates were rejected/i.test(errBlob);
-  if (!isNonFastForward) {
-    return { ok: false, out: push.stderr || push.stdout };
+  const errBlob = `${r.stderr}\n${r.stdout}`;
+  if (/upstream|--set-upstream|has no upstream branch/i.test(errBlob)) {
+    return { ok: false, out: r.stderr || r.stdout, failureKind: "upstream" };
   }
 
-  // Remote has commits we don't have (typically the README from GitHub's
-  // "initialize this repository" option). Pull-rebase, then re-push.
+  const isNonFastForward = /non-fast-forward|fetch first|updates were rejected/i.test(errBlob);
+  if (!isNonFastForward) {
+    return { ok: false, out: r.stderr || r.stdout, failureKind: "other" };
+  }
+
+  // Auto-recovery: fetch + rebase + retry.
   const branchInfo = await run("git", ["branch", "--show-current"], repoPath);
   const branch = branchInfo.stdout.trim() || "main";
 
   const fetch = await run("git", ["fetch", "origin"], repoPath);
   if (fetch.code !== 0) {
-    return { ok: false, out: `Fetch failed:\n${fetch.stderr || fetch.stdout}` };
+    return { ok: false, out: `Fetch failed:\n${fetch.stderr || fetch.stdout}`, failureKind: "other" };
   }
 
   const rebase = await run(
@@ -115,16 +109,44 @@ export async function setOriginAndPush(repoPath: string, cloneUrl: string): Prom
   if (rebase.code !== 0) {
     return {
       ok: false,
+      failureKind: "other",
       out:
-        `The GitHub repo has files we don't have locally and they couldn't be merged automatically.\n` +
-        `Resolve the conflicts in your editor, then run: git rebase --continue && git push -u origin HEAD\n\n` +
+        `GitHub has changes we don't have locally and they couldn't be merged automatically.\n` +
+        `Resolve the conflicts in your editor, then run: git rebase --continue && git push\n\n` +
         `${rebase.stderr || rebase.stdout}`,
     };
   }
 
-  push = await run("git", ["push", "-u", "origin", "HEAD"], repoPath);
-  if (push.code === 0) return { ok: true, out: push.stdout || "Pushed after pulling existing GitHub content" };
-  return { ok: false, out: push.stderr || push.stdout };
+  r = await run("git", ["push", ...args], repoPath);
+  if (r.code === 0) return { ok: true, out: r.stdout || "Pushed (after pulling existing GitHub commits)" };
+  return { ok: false, out: r.stderr || r.stdout, failureKind: "other" };
+}
+
+/**
+ * Plain push for the "remote already wired up" case. Falls back to
+ * --set-upstream if the branch has no upstream configured. Both attempts
+ * auto-recover from non-fast-forward via fetch + pull --rebase.
+ */
+export async function push(repoPath: string): Promise<{ ok: boolean; out: string }> {
+  const first = await tryPushOrRebase(repoPath, []);
+  if (first.ok) return first;
+  if (first.failureKind === "upstream") {
+    return tryPushOrRebase(repoPath, ["--set-upstream", "origin", "HEAD"]);
+  }
+  return first;
+}
+
+/**
+ * Wire up origin and push. Handles the common scenario 2 gotcha: the user
+ * created the GitHub repo with "Initialize with README" checked, so the
+ * remote already has a commit our local doesn't. Auto-recovery is in the
+ * shared tryPushOrRebase helper.
+ */
+export async function setOriginAndPush(repoPath: string, cloneUrl: string): Promise<{ ok: boolean; out: string }> {
+  await run("git", ["remote", "remove", "origin"], repoPath);
+  const add = await run("git", ["remote", "add", "origin", cloneUrl], repoPath);
+  if (add.code !== 0) return { ok: false, out: add.stderr };
+  return tryPushOrRebase(repoPath, ["-u", "origin", "HEAD"]);
 }
 
 /**
