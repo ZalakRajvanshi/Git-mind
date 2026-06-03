@@ -72,21 +72,13 @@ export async function ensureProjectRoot(): Promise<string | undefined> {
   const current = getProjectRoot();
   if (current && projectRootIsValid(current)) return current;
 
-  // Try to find the install ourselves before asking the user. This is the
-  // common case — same machine that cloned Gitlane is the one running the
-  // extension.
+  // Silent auto-detect: if we can find the install on this machine, just use
+  // it. No dialog, no questions. This is the same machine that cloned Gitlane,
+  // so 90% of the time we get it right and the user notices nothing.
   const auto = autoDetectGitlaneInstall();
   if (auto) {
-    const choice = await vscode.window.showInformationMessage(
-      `Found Gitlane install at:\n${auto}\n\nUse this?`,
-      { modal: false },
-      "Yes, use it", "Pick manually",
-    );
-    if (choice === "Yes, use it") {
-      await setProjectRoot(auto);
-      return auto;
-    }
-    // If they say "pick manually," fall through to the picker.
+    await setProjectRoot(auto);
+    return auto;
   }
 
   const proceed = await vscode.window.showInformationMessage(
